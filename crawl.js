@@ -1,14 +1,11 @@
 const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
-const grpc = require('@grpc/grpc-js');
-const { HealthClient } = require('grpc-health-check');
 
 const visitedNodes = new Set();
 const healthyNodes = {
     rpc: [],
-    rest: [],
-    grpc: []
+    rest: []
 };
 const timeout = 3000; // Timeout for requests in milliseconds
 
@@ -43,18 +40,31 @@ async function fetchChainInfo(chainName) {
     }
 }
 
-async function checkGrpcHealth(grpcUrl) {
-    return new Promise((resolve) => {
-        const healthClient = new HealthClient(grpcUrl, grpc.credentials.createInsecure());
-        healthClient.check({ service: '' }, (err, response) => {
-            if (err) {
-                console.error(`Error checking gRPC health at ${grpcUrl}:`, err.message);
-                resolve(false);
-            } else {
-                resolve(response.status === 'SERVING');
-            }
-        });
-    });
+async function checkRestEndpoint(url) {
+    try {
+        const response = await axios.get(url, { timeout });
+        const latestBlockTime = response.data.block.header.time;
+        const currentTime = new Date().toISOString();
+        return new Date(currentTime) - new Date(latestBlockTime) < 600000; // Check if the latest block is within the last 10 minutes
+    } catch (error) {
+        console.error(`Error checking REST endpoint at ${url}:`, error.message);
+        return false;
+    }
+}
+
+function generateRestUrls(url) {
+    const restUrls = [];
+    if (url.includes('rpc')) {
+        restUrls.push(url.replace('rpc', 'rest'));
+        restUrls.push(url.replace('rpc', 'lcd'));
+        restUrls.push(url.replace('rpc', 'api'));
+    } else {
+        const urlObj = new URL(url);
+        const baseUrl = `${urlObj.protocol}//${urlObj.hostname}`;
+        restUrls.push(`http://${urlObj.hostname}:1317`);
+        restUrls.push(`https://${urlObj.hostname}:443`);
+    }
+    return restUrls.map(baseUrl => `${baseUrl}/cosmos/base/tendermint/v1beta1/blocks/latest`);
 }
 
 async function crawlNetwork(url, maxDepth, currentDepth = 0) {
@@ -76,24 +86,6 @@ async function crawlNetwork(url, maxDepth, currentDepth = 0) {
         console.log(`Earliest Block Height: ${earliestBlockHeight}`);
         console.log(`Earliest Block Time: ${earliestBlockTime}`);
         healthyNodes.rpc.push(url.replace('/net_info', '')); // Add to healthy nodes
-
-        const restUrl = url.replace('26657', '1317') + '/cosmos/base/tendermint/v1beta1/blocks/latest';
-        try {
-            const restResponse = await axios.get(restUrl, { timeout });
-            const latestBlockTime = restResponse.data.block.header.time;
-            const currentTime = new Date().toISOString();
-            if (new Date(currentTime) - new Date(latestBlockTime) < 600000) { // Check if the latest block is within the last 10 minutes
-                healthyNodes.rest.push(restUrl.replace('/cosmos/base/tendermint/v1beta1/blocks/latest', ''));
-            }
-        } catch (error) {
-            console.error(`Error fetching REST endpoint at ${restUrl}:`, error.message);
-        }
-
-        const grpcUrl = url.replace('26657', '9090');
-        const grpcHealthy = await checkGrpcHealth(grpcUrl);
-        if (grpcHealthy) {
-            healthyNodes.grpc.push(grpcUrl);
-        }
     }
 
     const peers = netInfo.peers;
@@ -111,6 +103,19 @@ async function crawlNetwork(url, maxDepth, currentDepth = 0) {
     await Promise.all(crawlPromises);
 }
 
+async function findRestEndpoints() {
+    for (const rpcUrl of healthyNodes.rpc) {
+        const restUrls = generateRestUrls(rpcUrl);
+        for (const restUrl of restUrls) {
+            const restHealthy = await checkRestEndpoint(restUrl);
+            if (restHealthy) {
+                healthyNodes.rest.push(restUrl.replace('/cosmos/base/tendermint/v1beta1/blocks/latest', ''));
+                break;
+            }
+        }
+    }
+}
+
 async function initializeLoadBalancer(chainName, maxDepth) {
     const chainInfo = await fetchChainInfo(chainName);
     if (!chainInfo) {
@@ -121,6 +126,10 @@ async function initializeLoadBalancer(chainName, maxDepth) {
     for (const url of initialUrls) {
         await crawlNetwork(`${url}/net_info`, maxDepth);
     }
+
+    // Find REST endpoints
+    await findRestEndpoints();
+
     console.log('Crawling complete. Healthy nodes:', healthyNodes);
 
     const output = {
@@ -171,5 +180,5 @@ if (chains.length === 0) {
     for (const chain of chains) {
         await initializeLoadBalancer(chain, maxDepth);
     }
-    console.log('Load balancer initialized.');
+    console.log('Network crawling complete.');
 })();
