@@ -1,7 +1,8 @@
 const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
-const { execSync } = require('child_process');
+const grpc = require('@grpc/grpc-js');
+const { HealthClient } = require('grpc-health-check');
 
 const visitedNodes = new Set();
 const healthyNodes = {
@@ -42,6 +43,20 @@ async function fetchChainInfo(chainName) {
     }
 }
 
+async function checkGrpcHealth(grpcUrl) {
+    return new Promise((resolve) => {
+        const healthClient = new HealthClient(grpcUrl, grpc.credentials.createInsecure());
+        healthClient.check({ service: '' }, (err, response) => {
+            if (err) {
+                console.error(`Error checking gRPC health at ${grpcUrl}:`, err.message);
+                resolve(false);
+            } else {
+                resolve(response.status === 'SERVING');
+            }
+        });
+    });
+}
+
 async function crawlNetwork(url, maxDepth, currentDepth = 0) {
     if (currentDepth > maxDepth) {
         return;
@@ -62,20 +77,22 @@ async function crawlNetwork(url, maxDepth, currentDepth = 0) {
         console.log(`Earliest Block Time: ${earliestBlockTime}`);
         healthyNodes.rpc.push(url.replace('/net_info', '')); // Add to healthy nodes
 
-        const restUrl = url.replace('26657', '1317');
+        const restUrl = url.replace('26657', '1317') + '/cosmos/base/tendermint/v1beta1/blocks/latest';
         try {
-            await axios.get(restUrl, { timeout });
-            healthyNodes.rest.push(restUrl);
+            const restResponse = await axios.get(restUrl, { timeout });
+            const latestBlockTime = restResponse.data.block.header.time;
+            const currentTime = new Date().toISOString();
+            if (new Date(currentTime) - new Date(latestBlockTime) < 600000) { // Check if the latest block is within the last 10 minutes
+                healthyNodes.rest.push(restUrl.replace('/cosmos/base/tendermint/v1beta1/blocks/latest', ''));
+            }
         } catch (error) {
             console.error(`Error fetching REST endpoint at ${restUrl}:`, error.message);
         }
 
         const grpcUrl = url.replace('26657', '9090');
-        try {
-            await axios.get(grpcUrl, { timeout });
+        const grpcHealthy = await checkGrpcHealth(grpcUrl);
+        if (grpcHealthy) {
             healthyNodes.grpc.push(grpcUrl);
-        } catch (error) {
-            console.error(`Error fetching gRPC endpoint at ${grpcUrl}:`, error.message);
         }
     }
 
