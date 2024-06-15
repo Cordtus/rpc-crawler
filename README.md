@@ -20,7 +20,16 @@ node rpc_load_balancer.js --chain=akash --chain=osmosis --depth=3
 
 ### Output
 
-output is saved to json
+output json structure:
+
+ - chains: Object containing blockchain networks.
+   - each network (e.g. "osmosis") is an object with:
+       - endpoints: Categorized into:
+            - rpc: Array of RPC endpoints.
+            - rest: Array of REST endpoints.
+            - grpc: Array of gRPC endpoints.
+
+<details>
 
 ```json
 {
@@ -61,3 +70,5 @@ output is saved to json
   }
 }
 ```
+
+</details>
