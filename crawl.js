@@ -88,12 +88,12 @@ async function crawlNetwork(url, maxDepth, currentDepth = 0) {
         healthyNodes.rpc.push(url.replace('/net_info', '')); // Add to healthy nodes
     }
 
-    const peers = netInfo.peers;
+    const peers = netInfo.peers.filter(peer => !['0.0.0.0', '127.0.0.1', 'localhost'].includes(peer.remote_ip));
     const crawlPromises = peers.map(async (peer) => {
         const remoteIp = peer.remote_ip;
-        const rpcAddress = peer.node_info.other.rpc_address.replace('tcp://', 'http://').replace('0.0.0.0', remoteIp);
+        let rpcAddress = peer.node_info.other.rpc_address.replace('tcp://', 'http://').replace('0.0.0.0', remoteIp);
 
-        if (!visitedNodes.has(rpcAddress)) {
+        if (!visitedNodes.has(rpcAddress) && !rpcAddress.includes('0.0.0.0') && !rpcAddress.includes('127.0.0.1') && !rpcAddress.includes('localhost')) {
             visitedNodes.add(rpcAddress);
             console.log(`Crawling: ${rpcAddress}`);
             await crawlNetwork(`${rpcAddress}/net_info`, maxDepth, currentDepth + 1);
@@ -122,6 +122,9 @@ async function initializeLoadBalancer(chainName, maxDepth) {
         console.error(`No chain info found for ${chainName}`);
         return;
     }
+
+    const { chain_id, bech32_prefix } = chainInfo;
+
     const initialUrls = chainInfo.apis.rpc.map(api => api.address);
     for (const url of initialUrls) {
         await crawlNetwork(`${url}/net_info`, maxDepth);
@@ -135,6 +138,11 @@ async function initializeLoadBalancer(chainName, maxDepth) {
     const output = {
         chains: {
             [chainName]: {
+                chain_id: chain_id,
+                prefixes: {
+                    account: bech32_prefix,
+                    validator: `${bech32_prefix}valoper`
+                },
                 endpoints: healthyNodes
             }
         }
